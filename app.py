@@ -5,7 +5,7 @@ import uuid
 import logging
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Error as PWError
-from playwright_stealth import stealth_page
+from playwright_stealth import stealth_sync
 
 # --- Configuration ---
 VERSION = "8.5.0-STABLE"
@@ -54,7 +54,7 @@ class RazorpayEngine:
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             )
             page = context.new_page()
-            stealth_page(page)
+            stealth_sync(page)
 
             try:
                 logger.info(f"[{self.tx_id}] Processing: {self.url}")
